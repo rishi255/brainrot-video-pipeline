@@ -1,0 +1,13 @@
+[project]
+name = "brainrot-video-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-core>=0.3.68",
+    "langchain-tavily>=0.2.7",
+    "langchain[groq,openai]>=0.3.26",
+    "langgraph>=0.5.2",
+    "python-dotenv>=1.1.1",
+]
