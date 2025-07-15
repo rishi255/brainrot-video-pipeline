@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "coqui-tts>=0.27.0",
     "langchain-core>=0.3.68",
     "langchain-tavily>=0.2.7",
     "langchain[groq,openai]>=0.3.26",

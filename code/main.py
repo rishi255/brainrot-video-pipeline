@@ -93,11 +93,9 @@ class DialogueOutput(BaseModel):
     line: str = Field(description="The dialogue line.")
 
 
-class FactCheckedDialogueOutput(BaseModel):
+class FactCheckedDialogueOutput(DialogueOutput):
     """Represents a line of dialogue that is checked by the fact checking agent. A line could be approved or not approved."""
 
-    speaker: ValidSpeakers = Field(description="The speaker of the line.")
-    line: str = Field(description="The dialogue line.")
     approved: bool = Field(
         default=False,
         description="Whether the line has been fact-checked and approved by the FactChecker Agent.",
@@ -124,6 +122,17 @@ class FactCheckedDialogueListOutput(BaseModel):
     )
 
 
+class VoiceSynthOutput(DialogueOutput):
+    """Represents the output of the Voice Synth Node for one dialogue.
+
+    The Voice Synth Node is not an agent, but a simple node that converts the dialogue line to speech using a TTS model.
+    """
+
+    audio_path: str = Field(
+        description="Path to the generated audio file for the dialogue line."
+    )
+
+
 # ===================
 # Define State
 # ===================
@@ -137,7 +146,7 @@ class AgentState(TypedDict):
     research: ResearchOutput | None  # Output of the Research Agent
     dialogue: DialogueListOutput | None  # Output of the Dialogue Generator Agent
     fact_check: FactCheckedDialogueListOutput | None  # Output of the Fact Checker Agent
-    # voice_synth: VoiceSynthOutput | None  # Output of the Voice Synth Agent
+    voice_synth: VoiceSynthOutput | None  # Output of the Voice Synth Agent
     # video_stitch: VideoStitchOutput | None  # Output of the Video Stitch Agent
     quit: bool  # Whether to exit the bot
 
@@ -197,6 +206,14 @@ def feedback_loop_choice(
         "❗ Some dialogue lines need to be regenerated based on fact-checking feedback."
     )
     return "dialogue_generator"
+
+
+def text_to_speech(state: AgentState) -> dict:
+    """Converts the dialogue lines to speech using a text-to-speech model."""
+    # Use a TTS model to convert the dialogue lines to audio.
+    print("Converting dialogue to speech...")
+
+    return {"voice_synth": voice}  # Placeholder output
 
 
 def exit_bot(state: AgentState) -> dict:
@@ -317,6 +334,7 @@ def build_graph() -> CompiledStateGraph:
     builder.add_node("research_agent", research_agent)
     builder.add_node("dialogue_generator", dialogue_generator)
     builder.add_node("fact_checker", fact_checker)
+    builder.add_node("text_to_speech", text_to_speech)
     builder.add_node("exit_bot", exit_bot)
 
     builder.set_entry_point("get_user_input")
@@ -327,7 +345,8 @@ def build_graph() -> CompiledStateGraph:
     builder.add_edge("topic_analyzer", "research_agent")
     builder.add_edge("research_agent", "dialogue_generator")
     builder.add_edge("dialogue_generator", "fact_checker")
-    builder.add_edge("fact_checker", "exit_bot")
+    builder.add_edge("fact_checker", "text_to_speech")
+    builder.add_edge("text_to_speech", "exit_bot")
     builder.add_edge("exit_bot", END)
 
     return builder.compile()

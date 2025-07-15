@@ -1,3 +1,6 @@
+# any file starting with "archive_"
+archive_*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
