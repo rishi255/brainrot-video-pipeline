@@ -1,19 +1,21 @@
 import json
-from typing import List, Literal
-
+import os
+import shutil
 from enum import Enum
+from typing import Annotated, Dict, List, Literal, Union
+
+from langchain.memory import ConversationSummaryMemory
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_tavily import TavilySearch
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from llm import get_llm
-from paths import CONFIG_FILE_PATH, PROMPT_CONFIG_FILE_PATH
+from paths import CONFIG_FILE_PATH, OUTPUTS_DIR, PROMPT_CONFIG_FILE_PATH
 from prompt_builder import build_prompt_from_config
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field, ValidationError
+from TTS.api import TTS
 from typing_extensions import TypedDict
 from utils import load_config
-from pydantic import BaseModel, Field, ValidationError, BeforeValidator
-from typing import Literal, Union, Dict, Annotated
 
 # ========== Prompt Config ==========
 
@@ -37,9 +39,6 @@ SPEAKERS_MAP = {
     for speaker in SPEAKERS_MAP
     for speaker_name, speaker_info in speaker.items()
 }
-
-# Now it's of the form:
-# {'Saul Goodman': {'audio_path': 'assets/audio/saul.wav', 'image_path': 'assets/images/saul.png'}, 'Walter White': {'audio_path': 'assets/audio/walter.wav', 'image_path': 'assets/images/walter.png'}}
 
 ValidSpeakers = Enum(  # type: ignore[misc]
     "ValidSpeakers",
@@ -133,6 +132,35 @@ class VoiceSynthOutput(DialogueOutput):
     )
 
 
+class VoiceSynthListOutput(BaseModel):
+    """Represents the final output of the Voice Synth Node as a list of dialogues.
+
+    The Voice Synth Node is not an agent, but a simple node that converts the dialogue line to speech using a TTS model.
+    """
+
+    audio_paths: List[VoiceSynthOutput] = Field(
+        description="List of paths to the generated audio files for the dialogue lines."
+    )
+
+
+# ===================
+# Define Utility Functions
+# ===================
+
+
+def get_cleaned_topic_name(topic: str) -> str:
+    """Cleans the topic name by removing unwanted characters."""
+    return "".join(
+        char for char in topic if char.isalnum() or char in ("_", " ") or char.isspace()
+    ).replace(" ", "_")
+
+
+def get_topic_directory(topic: str) -> str:
+    """Returns the directory path for the given topic."""
+    topic_name = get_cleaned_topic_name(topic)
+    return os.path.join(OUTPUTS_DIR, topic_name)
+
+
 # ===================
 # Define State
 # ===================
@@ -152,6 +180,38 @@ class AgentState(TypedDict):
 
 
 # ========== Deterministic Nodes ==========
+
+
+def starting_node_choice(
+    state: AgentState,
+) -> Literal["get_user_input", "topic_analyzer"]:
+    """Router function to determine which node to start with."""
+
+    state_key_to_nodes = [
+        ("topic", "get_user_input"),
+        ("topic_analysis", "topic_analyzer"),
+        ("research", "research_agent"),
+        ("dialogue", "dialogue_generator"),
+        ("fact_check", "fact_checker"),
+        ("voice_synth", "text_to_speech"),
+        # ("video_stitch", "video_stitch"),  # Uncomment if you implement the Video Stitch Agent
+        # ("quit", "exit_bot"),  # Uncomment if you want to handle exit in a specific way
+    ]
+
+    for state_key, node in state_key_to_nodes:
+        # If the state key is not present or its value is None or empty, we start with the corresponding node.
+        if state_key not in state or not state[state_key]:
+            print(f"🔄 Starting with node named {repr(node)}.")
+            return node
+        # Even if fact check is populated in state, we also check if it is done and approved.
+        elif state_key == "fact_check" and (not is_all_dialogue_approved(state)):
+            print(
+                "🔄 Starting with node named 'fact_checker' as all dialogue is not approved."
+            )
+            return node
+
+    # If everything is populated, we can exit the bot.
+    return "exit_bot"
 
 
 def get_user_input(state: AgentState) -> dict:
@@ -194,13 +254,15 @@ def is_all_dialogue_approved(state: AgentState) -> bool:
 
 def feedback_loop_choice(
     state: AgentState,
-) -> Literal["dialogue_generator", "exit_bot"]:
-    """Router function to send dialogue(s) for regeneration if not approved. This should be only called after the Fact Checker Agent has run once."""
+) -> Literal["dialogue_generator", "text_to_speech"]:
+    """Router function to send dialogue(s) for regeneration if not approved. This should be only called after the Fact Checker Agent has run once.
+    If all dialogue lines are approved, it proceeds to the Voice Synth Node.
+    """
     assert is_fact_checking_done(state)
 
     if is_all_dialogue_approved(state):
         print("✅ All dialogue lines are approved.")
-        return "exit_bot"
+        return "text_to_speech"
 
     print(
         "❗ Some dialogue lines need to be regenerated based on fact-checking feedback."
@@ -213,7 +275,52 @@ def text_to_speech(state: AgentState) -> dict:
     # Use a TTS model to convert the dialogue lines to audio.
     print("Converting dialogue to speech...")
 
-    return {"voice_synth": voice}  # Placeholder output
+    tts = TTS("xtts").to("cuda")
+
+    voice_synth_output: list[VoiceSynthOutput] = []
+
+    topic_dir = get_topic_directory(state["topic"])
+
+    audio_dir_for_this_topic = os.path.join(topic_dir, "audio")
+
+    print(f"📂 Output audio directory for this topic: {audio_dir_for_this_topic}")
+
+    # delete output topic directory if it exists
+    if os.path.exists(topic_dir):
+        print(f"🗑️ Deleting existing topic directory: {topic_dir}")
+        shutil.rmtree(topic_dir)
+
+    # (re)create upto the output audio directory for this topic
+    os.makedirs(audio_dir_for_this_topic, exist_ok=True)
+
+    for i, dialogue in enumerate(state["fact_check"].dialogue, start=1):
+        # at this point dialogue is of type FactCheckedDialogueOutput
+        # it is guaranteed to be entirely approved due to the graph definition.
+        assert dialogue.approved, "Dialogue line must be approved to synthesize voice."
+
+        audio_path = os.path.join(
+            audio_dir_for_this_topic, f"{i}_{dialogue.speaker.value}.mp3"
+        )
+        tts.tts_to_file(
+            text=dialogue.line,
+            file_path=audio_path,
+            speaker_wav=[SPEAKERS_MAP[dialogue.speaker.value]["audio_path"]],
+            language="en",
+            split_sentences=True,
+        )
+        voice_synth_output.append(
+            VoiceSynthOutput(
+                speaker=dialogue.speaker,
+                line=dialogue.line,
+                audio_path=audio_path,
+            )
+        )
+
+    state["voice_synth"] = voice_synth_output
+    print("Voice synthesis complete. Audio files generated for each dialogue line.")
+
+    # return the voice_synth_output.
+    return {"voice_synth": VoiceSynthListOutput(audio_paths=voice_synth_output)}
 
 
 def exit_bot(state: AgentState) -> dict:
@@ -266,18 +373,18 @@ def research_agent(state: AgentState) -> dict:
 def dialogue_generator(state: AgentState) -> dict:
     """Generates dialogue based on the research."""
 
-    print("Generating dialogue for topic:", state["topic"])
-
-    dialogue_generator_llm = get_llm(model_name=MODEL_NAME, temperature=0)
-
     input_data = f"Topic: {state['topic']}\nResearch: {state['research']}"
 
-    if is_fact_checking_done(state):
+    if is_fact_checking_done(state) and not is_all_dialogue_approved(state):
         # that means dialogue needs to be REgenerated.
         input_data += (
             f"\nNOTE: Some of your generated dialogues were not factually correct. Please fix the ones that are not approved and refer to the review comments provided by the FactChecker."
-            + f"Fact Checker Output:\n{state['fact_check']}"
+            f"Fact Checker Output:\n{state['fact_check']}"
         )
+
+    print("Generating dialogue for topic:", state["topic"])
+
+    dialogue_generator_llm = get_llm(model_name=MODEL_NAME, temperature=0)
 
     prompt = build_prompt_from_config(
         prompt_cfg["DialogueGenerator_prompt_cfg"],
@@ -337,15 +444,19 @@ def build_graph() -> CompiledStateGraph:
     builder.add_node("text_to_speech", text_to_speech)
     builder.add_node("exit_bot", exit_bot)
 
-    builder.set_entry_point("get_user_input")
+    # builder.set_entry_point("get_user_input")
+    # Conditional start edge, based on what is defined in the state
+    builder.add_conditional_edges(START, starting_node_choice)
 
     builder.add_conditional_edges("get_user_input", route_choice)
-    builder.add_conditional_edges("fact_checker", feedback_loop_choice)
 
     builder.add_edge("topic_analyzer", "research_agent")
     builder.add_edge("research_agent", "dialogue_generator")
     builder.add_edge("dialogue_generator", "fact_checker")
-    builder.add_edge("fact_checker", "text_to_speech")
+
+    # From fact_checker, if all dialogue lines are approved, proceed to text-to-speech.
+    builder.add_conditional_edges("fact_checker", feedback_loop_choice)
+
     builder.add_edge("text_to_speech", "exit_bot")
     builder.add_edge("exit_bot", END)
 
@@ -362,29 +473,46 @@ def main():
 
     # Get image representation of the graph
     print("\n📊 Generating graph...")
-    graph.get_graph().draw_mermaid_png(output_file_path="video_creation_graph.png")
-    print("\t💹 Graph image saved as 'video_creation_graph.png'.")
+    graph_png_save_path = os.path.join(OUTPUTS_DIR, "flow_graph.png")
+    graph.get_graph().draw_mermaid_png(output_file_path=graph_png_save_path)
+    print(f"\t💹 Graph image saved as '{graph_png_save_path}'.")
 
     print("\n🚀 Starting the video creation process...")
+
+    starting_state = {
+        "topic": "",
+        "topic_analysis": None,
+        "research": None,
+        "dialogue": None,
+        "fact_check": None,
+        "voice_synth": None,
+        # "video_stitch": None,  # Uncomment if you implement the Video Stitch Agent
+        "quit": False,
+    }
+
     final_state: dict = graph.invoke(
-        {
-            "topic": "",
-            "topic_analysis": None,
-            "research": None,
-            "dialogue": None,
-            "quit": False,
-        },
+        starting_state,
         config={"recursion_limit": 200},
     )
     print("\t✅ Done.")
 
-    # Convert the final_state dictionary to a JSON string
-    final_state_json = json.dumps(final_state, indent=4, default=lambda o: o.__dict__)
-    # Save final state json to a file
-    with open("final_video_state.json", "w") as f:
-        f.write(final_state_json)
+    final_json = json.dumps(final_state, indent=4, default=lambda o: repr(o))
+    json_file_path = os.path.join(
+        get_topic_directory(final_state["topic"]), "json_state.json"
+    )
+    # Save state json to a file
+    with open(json_file_path, "w") as f:
+        f.write(final_json)
+    print(f"\n📄 Final state JSON saved as '{json_file_path}'.")
 
-    print("\n📄 Final state saved as 'final_video_state.json'.")
+    final_repr = repr(final_state)
+    repr_file_path = os.path.join(
+        get_topic_directory(final_state["topic"]), "repr_state.txt"
+    )
+    # Save state representation to a file
+    with open(repr_file_path, "w") as f:
+        f.write(final_repr)
+    print(f"\n📄 Final state representation saved as '{repr_file_path}'.")
 
     if "dialogue" in final_state:
         print("Printing Final Dialogue:")

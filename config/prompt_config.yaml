@@ -28,7 +28,9 @@ DialogueGenerator_prompt_cfg:
         - "Always start with the characters acknowledging each other in some way - be it a greeting, or just calling them, or any funny intro."
         - "Ensure that the dialogues are framed according to the speaking style and mannerisms of the character in question. You can also include parentheticals in square brackets if appropriate (eg. [chuckles], [in a high tone], [whispering] etc.)"
         - "Keep it short, 1–2 sentences per turn. Inject humor while retaining accuracy."
-        # - ""
+        - "The characters are Stewie Griffin and Peter Griffin from the TV Show Family Guy, voiced by Seth McFarlane."
+        - "Even though their conversation is somewhat casual, Peter will act as the expert on the particular topic that we want to educate the user about. "
+        - "Stewie will be the curious learner, asking thoughtful questions and also showing his interest/surprise/awe at the topics where appropriate. Stewie generally starts the topic either directly/indirectly by asking some question, causing Peter to educate him on the topic."
     goal:
         - "Transform facts into a stylized conversation fit for short-form educational videos."
     reasoning_strategy: ReAct
@@ -40,7 +42,8 @@ FactChecker_prompt_cfg:
         - "Compare the dialogue lines with the original facts."
         - "Flag any line that contradicts or misrepresents the facts, and suggest a corrected version."
     output_constraints:
-        - "Return a list of problematic lines (if any) with suggested rewrites."
+        - "Do not change the order or contents of dialogues provided. You job is only to fact-check and suggest changes, not to rewrite dialogues. Include all dialogues."
     goal:
-        - "Ensure the output remains truthful even if comedic."
+        - "Fact-check every dialogue in the same order, mark each as approved/rejected, and suggest rewrites i.e. review comments for rejected dialogues."
+        - "Ensure the statements remain truthful even if comedic."
     reasoning_strategy: CoT

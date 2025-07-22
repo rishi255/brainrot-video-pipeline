@@ -1,10 +1,10 @@
 speakers:
     - Peter Griffin:
           audio_path: "assets/audio/peter_10_minutes.mp3" # path relative to wherever you run main.py from
-          # image_path: "assets/images/peter.png"
+          image_path: "assets/images/peter.png"
     - Stewie Griffin:
           audio_path: "assets/audio/stewie_30sec.mp3" # path relative to wherever you run main.py from
-          # image_path: "assets/images/stewie.png"
+          image_path: "assets/images/stewie.png"
 
 llm: gpt-4o-mini
 
